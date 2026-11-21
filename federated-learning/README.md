@@ -23,9 +23,25 @@ The design is described in `docs/E6_Federated_Unit_Report.pdf`.
 | `fedsepsis/orchestrator.py` | Orchestrator Agent: validates and filters updates |
 | `fedsepsis/server.py` | Central server rounds, aggregation, attack simulation |
 | `fedsepsis/experiment.py` | Local, FedAvg, FedProx and centralised schemes; artifacts; results JSON |
-| `fedsepsis/inference.py` | `HospitalPredictor`: scores one window with audit fields |
-| `run_federated.py` | Command line |
+| `fedsepsis/inference.py` | `HospitalPredictor`: loads a unit's models and scores windows |
+| `fedsepsis/agents.py` | The three agents and the orchestrator that runs them and writes the audit record |
+| `run_federated.py` | Command line for training |
+| `assess.py` | Command line for one assessment through the three agents |
 | `tests/` | Synthetic test data generator and tests |
+
+## Three agents per hospital unit
+
+1. **Data Gathering and Preprocessing Agent**: gathers the latest 16-hour window, fingerprints
+   it (SHA-256), validates it, sets impossible values to missing, imputes and scales it, and
+   measures the trend of key vitals.
+2. **Sepsis Prediction Agent**: scores with every model, calibrates, combines with the
+   hospital's ensemble weights, decides the alert with the hospital's threshold, and reports
+   the hospital's precision, sensitivity, specificity and alerts per 100 windows.
+3. **Explainability and Clinical Guidance Agent**: occlusion explanation, reference-range
+   flags, fixed decision-support guidance (diagnosis, treatment and medication wording is
+   blocked) and the clinician report.
+
+The orchestrator runs them in order, stops if the data is unusable, and writes the audit record.
 
 ## Run
 
@@ -47,6 +63,10 @@ Options:
   hospital for a quick trial.
 
 A GPU is used automatically when PyTorch finds one.
+
+One assessment inside a hospital unit, printed as a JSON trace:
+
+    python assess.py --unit artifacts/fedprox/hospital_A --patient data/training_setA/p000009.psv
 
 ## Tests
 

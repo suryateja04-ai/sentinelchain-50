@@ -1,4 +1,4 @@
-"""Scoring one window inside a hospital unit, with the audit fields the Audit agent stores."""
+"""Loading a hospital unit's deployed models and scoring windows with them."""
 from __future__ import annotations
 
 import datetime as dt
@@ -15,6 +15,10 @@ from .config import N_FEATURES, WINDOW
 from .fedstats import Preprocessor
 
 
+def window_sha256(window: np.ndarray) -> str:
+    return hashlib.sha256(np.asarray(window, np.float32).tobytes()).hexdigest()
+
+
 class HospitalPredictor:
     def __init__(self, folder):
         with open(os.path.join(folder, "model_card.json")) as f:
@@ -29,28 +33,37 @@ class HospitalPredictor:
         trees = os.path.join(folder, "trees.joblib")
         self.tree_sets = joblib.load(trees) if os.path.exists(trees) else []
         self.cal = joblib.load(os.path.join(folder, "calibrators.joblib"))
+        self.weights = self.card["ensemble_weights"]
+        self.threshold = self.card["threshold"]
 
     @torch.no_grad()
-    def predict(self, window: np.ndarray) -> dict:
-        """window: raw (16, 39) values with NaN for missing."""
-        window = np.asarray(window, np.float32)
-        if window.shape != (WINDOW, N_FEATURES):
-            raise ValueError(f"expected ({WINDOW}, {N_FEATURES}), got {window.shape}")
-        x = self.prep.transform(window[None])
-        raw = {n: float(torch.sigmoid(m(torch.from_numpy(x)))[0]) for n, m in self.neural.items()}
+    def score_batch(self, windows: np.ndarray) -> dict:
+        """windows: raw (n, 16, 39) with NaN for missing. Returns the ensemble probability
+        and every model's raw and calibrated score, each of length n."""
+        windows = np.asarray(windows, np.float32)
+        if windows.ndim != 3 or windows.shape[1:] != (WINDOW, N_FEATURES):
+            raise ValueError(f"expected (n, {WINDOW}, {N_FEATURES}), got {windows.shape}")
+        x = self.prep.transform(windows)
+        raw = {n: torch.sigmoid(m(torch.from_numpy(x))).numpy() for n, m in self.neural.items()}
         if self.tree_sets:
+            flat = x.reshape(len(x), -1)
             total = sum(n for _, n in self.tree_sets)
             for name in self.tree_sets[0][0]:
-                raw[name] = float(sum(t[name].predict_proba(x.reshape(1, -1))[0, 1] * n
-                                      for t, n in self.tree_sets) / total)
-        weights = self.card["ensemble_weights"]
-        calibrated = {m: float(self.cal[m].predict([r])[0]) for m, r in raw.items()}
-        p = float(sum(calibrated[m] * w for m, w in weights.items()))
-        thr = self.card["threshold"]
-        return {"probability": p, "alert": p >= thr, "raw": raw, "calibrated": calibrated,
+                raw[name] = sum(t[name].predict_proba(flat)[:, 1] * n for t, n in self.tree_sets) / total
+        calibrated = {m: self.cal[m].predict(r) for m, r in raw.items()}
+        p = sum(calibrated[m] * w for m, w in self.weights.items())
+        return {"probability": np.asarray(p, float), "raw": raw, "calibrated": calibrated}
+
+    def predict(self, window: np.ndarray) -> dict:
+        """One raw (16, 39) window, with the audit fields."""
+        s = self.score_batch(np.asarray(window, np.float32)[None])
+        p = float(s["probability"][0])
+        return {"probability": p, "alert": p >= self.threshold,
+                "raw": {m: float(v[0]) for m, v in s["raw"].items()},
+                "calibrated": {m: float(v[0]) for m, v in s["calibrated"].items()},
                 "audit": {"hospital_id": self.card["hospital_id"],
                           "model_version": self.card["model_version"],
                           "trained_on": self.card["trained_on"],
-                          "input_sha256": hashlib.sha256(window.tobytes()).hexdigest(),
-                          "ensemble_weights": weights, "threshold": thr,
+                          "input_sha256": window_sha256(window),
+                          "ensemble_weights": self.weights, "threshold": self.threshold,
                           "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}}

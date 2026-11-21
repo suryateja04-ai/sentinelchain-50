@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from .fedstats import federated_preprocessor
-from .metrics import evaluate, ranking
+from .metrics import at_threshold, evaluate, ranking
 from .server import federated_training
 from .unit import HospitalUnit
 
@@ -54,9 +54,14 @@ def raw_scores(bundle, unit, windows):
 def deploy(bundle, site, eval_units):
     """Personalise the bundle at `site` and evaluate it on each eval unit's test patients."""
     site.prepare(bundle["prep"])
-    cal, weights, thr = site.personalise(raw_scores(bundle, site, site.val))
+    val_raw = raw_scores(bundle, site, site.val)
+    cal, weights, thr = site.personalise(val_raw)
+    op = at_threshold(site.val.labels, HospitalUnit.ensemble(val_raw, cal, weights), thr)
     out = {"trained_on": bundle["trained_on"], "personalised_at": site.id,
-           "ensemble_weights": weights, "threshold": thr, "test": {}, "models_test": {}}
+           "ensemble_weights": weights, "threshold": thr,
+           "operating_point": {k: op[k] for k in ("sensitivity", "specificity", "precision", "npv", "f1",
+                                                 "alerts_per_100")},
+           "test": {}, "models_test": {}}
     for e in eval_units:
         e.prepare(bundle["prep"])
         raw = raw_scores(bundle, e, e.test)
@@ -66,7 +71,7 @@ def deploy(bundle, site, eval_units):
     return out, cal, weights, thr
 
 
-def save_unit_artifacts(folder, unit, bundle, cal, weights, thr, version):
+def save_unit_artifacts(folder, unit, bundle, cal, weights, thr, version, operating_point=None):
     os.makedirs(folder, exist_ok=True)
     bundle["prep"].save(os.path.join(folder, "preprocessor.json"))
     for name, state in bundle["states"].items():
@@ -79,7 +84,8 @@ def save_unit_artifacts(folder, unit, bundle, cal, weights, thr, version):
                    "trained_on": bundle["trained_on"], "neural_models": list(bundle["states"]),
                    "tree_models": list(bundle["tree_sets"][0][0]) if bundle["tree_sets"] else [],
                    "ensemble_weights": weights, "threshold": thr,
-                   "personalised_on": f"validation patients of hospital {unit.id}"}, f, indent=1)
+                   "personalised_on": f"validation patients of hospital {unit.id}",
+                   "operating_point_on_validation": operating_point or {}}, f, indent=1)
 
 
 def run(units, schemes, neural, trees, rounds, local_epochs=1, mu=0.01, tree_sample=None,
@@ -120,7 +126,7 @@ def run(units, schemes, neural, trees, rounds, local_epochs=1, mu=0.01, tree_sam
             res["schemes"][scheme][u.id] = out
             if artifacts:
                 save_unit_artifacts(os.path.join(artifacts, scheme, f"hospital_{u.id}"), u, b, cal, w, thr,
-                                    f"{version}-{scheme}")
+                                    f"{version}-{scheme}", out["operating_point"])
 
     if "centralized" in schemes:
         log("[centralized] all data pooled (reference only)")

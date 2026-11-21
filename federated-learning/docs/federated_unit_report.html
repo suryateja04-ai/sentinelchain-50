@@ -49,6 +49,11 @@ code { font-family:"DejaVu Sans Mono",monospace; font-size:8.7pt; background:var
 .wire { border:.8pt solid var(--line); border-radius:5pt; padding:6pt 8pt; font-size:8.8pt; break-inside:avoid; }
 .wire h4 { margin:0 0 4pt; font-size:9.5pt; color:var(--acc); }
 .tick { color:var(--acc); font-weight:bold; } .todo { color:var(--warn); font-weight:bold; }
+.flow3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8pt; margin:4pt 0 8pt; break-inside:avoid; }
+.ag3 { border:1pt solid var(--acc); border-radius:5pt; padding:5pt 7pt; font-size:8.6pt; }
+.ag3 .n { font-size:7.5pt; font-weight:bold; letter-spacing:.08em; color:var(--acc); }
+.ag3 b { display:block; font-size:9.6pt; margin:1pt 0 3pt; }
+.ag3 ul { margin:0; padding-left:11pt; } .ag3 li { margin-bottom:1.5pt; }
 </style></head><body>
 
 <div class="cover">
@@ -75,7 +80,7 @@ The data stays in each hospital; only signed and validated model updates travel 
 <tr><td>Federated Aggregation (FedAvg / FedProx)</td><td>Weighted average of accepted updates; FedProx variant for non-IID hospitals</td></tr>
 <tr><td>Global Model</td><td>New global weights with a version and SHA-256 digest</td></tr>
 <tr><td>Universal updates, repeated rounds</td><td>Global model sent back to every hospital each round</td></tr>
-<tr><td>Prediction, explanation, clinician</td><td>The existing ten-agent pipeline, run inside each hospital unit</td></tr>
+<tr><td>Prediction, explanation, clinician</td><td>The three-agent pipeline (Section 9), run inside each hospital unit</td></tr>
 <tr><td>Hospital console and administrator screens</td><td>Hospital Unit page per hospital and a Central Server page in the portal</td></tr>
 <tr><td>FedAvg vs FedProx comparison, per-client results</td><td>Same comparisons, plus local-only and centralised references</td></tr>
 </table>
@@ -102,7 +107,7 @@ The data stays in each hospital; only signed and validated model updates travel 
   <div class="arrow">➜</div>
   <div class="col">
     <div class="out"><b>Personalisation</b>each hospital calibrates, weights and sets its own threshold on its own validation patients</div>
-    <div class="out"><b>Ten-agent pipeline</b>validation, prediction, explanation, safety, report, alert, audit (with hospital ID)</div>
+    <div class="out"><b>Three agents</b>1 data gathering and preprocessing &middot; 2 sepsis prediction &middot; 3 explainability and clinical guidance</div>
     <div class="out"><b>Clinician</b>sees risk, reasons, flags and alerts</div>
   </div>
   <div class="loop">Hospitals send signed updates to the server &nbsp;&middot;&nbsp; &#8635; universal update: the global model goes back to every hospital unit, and the round repeats</div>
@@ -185,10 +190,32 @@ FedProx:   local objective at hospital k
 <ul><li><b>Isotonic calibration</b> per model, so probabilities match that hospital's own sepsis rate.</li>
 <li><b>Ensemble weights</b> found with SLSQP on that hospital's validation log-loss.</li>
 <li><b>Alert threshold</b> by the same rule: best F1 with recall &ge; 0.50, on that hospital's validation patients.</li></ul>
-<p>So Hospital A and Hospital B share what they learn but each gets an ensemble and threshold that fit its own patients. The unit's artifacts (preprocessor, models, calibrators, weights, threshold, model card) are stored in the hospital's own folder, and the Prediction agent of that hospital loads them.</p>
-<p>The Audit agent's record is extended with the <b>hospital ID</b>, the <b>federated model version</b> and the list of hospitals the model was trained on, next to the SHA-256 of the input window.</p>
+<p>So Hospital A and Hospital B share what they learn but each gets an ensemble and threshold that fit its own patients. The unit's artifacts (preprocessor, models, calibrators, weights, threshold, model card) are stored in the hospital's own folder, and that hospital's Sepsis Prediction Agent loads them.</p>
+<p>The audit record written by the orchestrator includes the <b>hospital ID</b>, the <b>federated model version</b> and the list of hospitals the model was trained on, next to the SHA-256 of the input window.</p>
 
-<h2><span class="no">9</span>Experiments and evaluation</h2>
+<h2><span class="no">9</span>Three-agent pipeline in each hospital unit</h2>
+<p>Phase-I used ten agents. Several of them were single steps rather than decisions (loading a file, writing a log line), so the pipeline is reduced to <b>three agents, each owning one complete responsibility</b>. Every hospital unit runs the same three agents with its own personalised models.</p>
+<div class="flow3">
+  <div class="ag3"><div class="n">AGENT 1</div><b>Data Gathering and Preprocessing</b>
+  <ul><li>Gathers the latest 16-hour window (16 &times; 39) from the hospital's record</li><li>Fingerprints the input as received (SHA-256)</li><li>Validates shape and history length; sets impossible values to missing</li><li>Reports vitals and labs observed</li><li>Applies the federated imputer and scaler</li><li>Measures slope and 4-hour change of key vitals</li></ul></div>
+  <div class="ag3"><div class="n">AGENT 2</div><b>Sepsis Prediction</b>
+  <ul><li>Scores the window with the GRU, LSTM, Temporal CNN, Logistic Regression, LightGBM and XGBoost models</li><li>Calibrates each score with the hospital's isotonic calibrators</li><li>Combines them with the hospital's ensemble weights</li><li>Decides the alert with the hospital's own threshold</li><li>Reports the hospital's precision, sensitivity, specificity and alerts per 100 windows at that threshold</li></ul></div>
+  <div class="ag3"><div class="n">AGENT 3</div><b>Explainability and Clinical Guidance</b>
+  <ul><li>Occlusion: contribution of every observed signal, in percentage points</li><li>Flags latest values outside adult reference ranges</li><li>Writes fixed decision-support guidance</li><li>Blocks diagnosis, treatment and medication wording</li><li>Builds the clinician report</li></ul></div>
+</div>
+<p>The <b>orchestrator</b> is not an agent. It runs the three agents in order, records each one's status, time and output, stops the run if Agent 1 finds the data unusable, and writes the <b>audit record</b>: trace ID, hospital ID, SHA-256 of the input window, federated model version, hospitals trained on, ensemble weights, threshold, probability, alert and timestamp.</p>
+<h3>Where the ten Phase-I agents went</h3>
+<table>
+<tr><th>Phase-I agent</th><th>Now part of</th></tr>
+<tr><td>Data Loader, Validation, Preprocessing, Temporal Analysis</td><td>Agent 1: Data Gathering and Preprocessing</td></tr>
+<tr><td>Prediction, Alert</td><td>Agent 2: Sepsis Prediction</td></tr>
+<tr><td>Explanation, Clinical Safety, Report</td><td>Agent 3: Explainability and Clinical Guidance</td></tr>
+<tr><td>Audit</td><td>Orchestrator (logging, not a decision)</td></tr>
+</table>
+<div class="box key"><b class="lbl">If asked "why only three agents?"</b>
+An agent should own one complete responsibility and make its own decisions. Getting usable data, judging the sepsis risk, and explaining that risk safely to a clinician are three different responsibilities. The ten Phase-I steps were functions inside those three, so they are now grouped under the agent that owns them.</div>
+
+<h2><span class="no">10</span>Experiments and evaluation</h2>
 <table>
 <tr><th>Scheme</th><th>Description</th><th>Purpose</th></tr>
 <tr><td>Local</td><td>Each hospital trains only on its own data</td><td>What a hospital achieves alone</td></tr>
@@ -210,7 +237,7 @@ FedProx:   local objective at hospital k
 <div class="box note"><b class="lbl">Results</b>
 No federated results are reported here yet. They will come only from running the module on the real PhysioNet files; the synthetic files in the test folder exist only to check that the code runs.</div>
 
-<h2><span class="no">10</span>Portal screens</h2>
+<h2><span class="no">11</span>Portal screens</h2>
 <div class="two">
   <div class="wire"><h4>Hospital Unit console (one per hospital)</h4>
   <ul style="margin:0"><li>Hospital selector: Hospital A, Hospital B, &hellip;</li>
@@ -228,19 +255,19 @@ No federated results are reported here yet. They will come only from running the
   <li>Cross-hospital matrix</li>
   <li>Global model version, digest and bytes exchanged</li></ul></div>
 </div>
-<p>The existing AI Pipeline screen gains a hospital selector, so the ten agents run with the selected hospital's personalised models.</p>
+<p>The existing AI Pipeline screen gains a hospital selector, so the three agents run with the selected hospital's personalised models, and the pipeline view shows three stages instead of ten.</p>
 
-<h2><span class="no">11</span>Differences from the reference</h2>
+<h2><span class="no">12</span>Differences from the reference</h2>
 <table>
 <tr><th>Reference</th><th>This project</th><th>Reason</th></tr>
 <tr><td>UCI heart disease, 5 simulated clients</td><td>PhysioNet sepsis, 2 real hospital systems (more by ICU type)</td><td>Real hospital boundaries</td></tr>
 <tr><td>One MLP</td><td>Four neural models plus shared tree models, then a calibrated ensemble</td><td>Keeps the Phase-I ensemble</td></tr>
-<tr><td>Diagnosis Agent using an LLM</td><td>Existing Explanation and Clinical Safety agents</td><td>The project never states a diagnosis; fixed safe wording only</td></tr>
+<tr><td>Diagnosis Agent using an LLM</td><td>Explainability and Clinical Guidance Agent (rule-based wording)</td><td>The project never states a diagnosis; fixed safe wording only</td></tr>
 <tr><td>SHAP (proposed)</td><td>Occlusion now, SHAP comparison planned</td><td>Works on the whole ensemble</td></tr>
 <tr><td>One global model</td><td>Global model plus per-hospital calibration, weights and threshold</td><td>Each hospital runs on its own data</td></tr>
 </table>
 
-<h2><span class="no">12</span>Implementation status</h2>
+<h2><span class="no">13</span>Implementation status</h2>
 <table>
 <tr><th>Part</th><th>Status</th></tr>
 <tr><td>Hospital unit: loading, cleaning, patient split, 16-hour windows</td><td class="tick">Built and tested</td></tr>
@@ -251,7 +278,8 @@ No federated results are reported here yet. They will come only from running the
 <tr><td>Per-hospital personalisation, artifacts and hospital predictor with audit fields</td><td class="tick">Built and tested</td></tr>
 <tr><td>Run on the real PhysioNet files</td><td class="todo">To do (on the team laptop, where the data is)</td></tr>
 <tr><td>Hospital Unit and Central Server portal pages</td><td class="todo">To do after this report is approved</td></tr>
-<tr><td>Integration into the portal source and the ten-agent pipeline</td><td class="todo">Needs the portal and agent source code</td></tr>
+<tr><td>Three-agent pipeline with orchestrator and audit record</td><td class="tick">Built and tested (completion, early stop, cleaning, flags, wording, audit hash)</td></tr>
+<tr><td>Replacing the ten agents in the deployed portal and Python service</td><td class="todo">Needs the portal and service source code</td></tr>
 </table>
 
 <h3>How to run</h3>
@@ -262,5 +290,8 @@ python run_federated.py \
   --rounds 5 --artifacts artifacts --out results/federated_results.json
 
 # more non-IID clients:          add --split-by-icu
-# show the orchestrator working: add --attack B scale</div>
+# show the orchestrator working: add --attack B scale
+
+# one assessment through the three agents inside Hospital A:
+python assess.py --unit artifacts/fedprox/hospital_A --patient data/training_setA/p000009.psv</div>
 </body></html>
